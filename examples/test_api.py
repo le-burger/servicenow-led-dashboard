@@ -101,7 +101,14 @@ def test_servicenow_connection(config):
 
     try:
         # Initialize API client
-        api = ServiceNowAPI(**sn_config)
+        api_config = {
+            'instance_url': sn_config['instance_url'],
+            'username': sn_config['username'],
+            'password': sn_config['password'],
+            'verify_ssl': sn_config.get('verify_ssl', True),
+            'timeout': sn_config.get('timeout', 30)
+        }
+        api = ServiceNowAPI(**api_config)
         print("✅ ServiceNow API client initialized")
 
         # Test basic connection
