@@ -1,30 +1,14 @@
-#!/usr/bin/env python3
-"""
-ServiceNow API Client for LED Scoreboard
-Fetches performance metrics and incident data from ServiceNow
-"""
+import logging
+from typing import Dict, List, Any
 
 import requests
-import json
-import logging
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional
-import base64
 
 
 class ServiceNowAPI:
+    """Fully modular ServiceNow API client that's entirely config-driven"""
+
     def __init__(self, instance_url: str, username: str, password: str,
                  verify_ssl: bool = True, timeout: int = 30):
-        """
-        Initialize ServiceNow API client
-
-        Args:
-            instance_url: ServiceNow instance URL (e.g., 'https://yourinstance.service-now.com')
-            username: ServiceNow username
-            password: ServiceNow password
-            verify_ssl: Whether to verify SSL certificates
-            timeout: Request timeout in seconds
-        """
         self.instance_url = instance_url.rstrip('/')
         self.username = username
         self.password = password
@@ -32,310 +16,351 @@ class ServiceNowAPI:
         self.timeout = timeout
 
         # Setup logging
-        logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger(__name__)
 
-        # Setup session with authentication
+        # Session for connection reuse
         self.session = requests.Session()
         self.session.auth = (username, password)
-        self.session.headers.update({
-            'Accept': 'application/json',
-            'Content-Type': 'application/json'
-        })
+        self.session.verify = verify_ssl
 
     def _make_request(self, endpoint: str, params: Dict = None) -> Dict:
         """Make authenticated request to ServiceNow API"""
-        url = f"{self.instance_url}/api/now/{endpoint}"
+        url = f"{self.instance_url}{endpoint}"
 
         try:
-            response = self.session.get(
-                url,
-                params=params,
-                verify=self.verify_ssl,
-                timeout=self.timeout
-            )
+            response = self.session.get(url, params=params, timeout=self.timeout)
             response.raise_for_status()
             return response.json()
-
         except requests.exceptions.RequestException as e:
             self.logger.error(f"API request failed: {e}")
-            return {"result": [], "error": str(e)}
+            raise
 
-    def get_incident_metrics(self) -> Dict:
-        """
-        Get current incident metrics similar to NHL game data
-        Returns incident counts by priority and state
-        """
-        # Get incidents from last 24 hours
-        now = datetime.now()
-        yesterday = now - timedelta(days=1)
-
+    def get_data_from_table(self, table_name: str, fields: List[str] = None,
+                            query: str = None, limit: int = 50) -> List[Dict]:
+        """Generic method to fetch data from any ServiceNow table"""
         params = {
-            'sysparm_query': f'opened_at>={yesterday.strftime("%Y-%m-%d %H:%M:%S")}',
-            'sysparm_fields': 'priority,state,opened_at,resolved_at,assignment_group,short_description',
-            'sysparm_limit': '1000'
+            'sysparm_limit': limit
         }
 
-        data = self._make_request('table/incident', params)
+        if fields:
+            params['sysparm_fields'] = ','.join(fields)
+        if query:
+            params['sysparm_query'] = query
 
-        if 'error' in data:
-            return self._get_empty_metrics()
+        try:
+            response = self._make_request(f"/api/now/table/{table_name}", params)
+            return response.get('result', [])
+        except Exception as e:
+            self.logger.warning(f"Failed to fetch data from table '{table_name}': {e}")
+            return []
 
-        incidents = data.get('result', [])
 
-        # Process incidents into metrics
-        metrics = {
-            'total_incidents': len(incidents),
-            'by_priority': {'1': 0, '2': 0, '3': 0, '4': 0, '5': 0},
-            'by_state': {
-                'new': 0,
-                'in_progress': 0,
-                'on_hold': 0,
-                'resolved': 0,
-                'closed': 0,
-                'canceled': 0
-            },
-            'open_incidents': 0,
-            'resolved_today': 0,
-            'assignment_groups': {},
-            'last_updated': now.strftime('%Y-%m-%d %H:%M:%S')
+class ConfigDrivenDashboard:
+    """Config-driven dashboard that dynamically handles data sources"""
+
+    def __init__(self, config: Dict, api: ServiceNowAPI):
+        self.config = config
+        self.api = api
+        self.logger = logging.getLogger(__name__)
+
+        # Define available data source handlers
+        self.data_handlers = {
+            'incidents': self._get_incidents,
+            'service_requests': self._get_service_requests,
+            'system_health': self._get_system_health,
+            'custom_metrics': self._get_custom_metrics
         }
 
-        state_mapping = {
-            '1': 'new',
-            '2': 'in_progress',
-            '3': 'on_hold',
-            '6': 'resolved',
-            '7': 'closed',
-            '8': 'canceled'
+        # Define data processors
+        self.data_processors = {
+            'incidents': self._process_incidents,
+            'service_requests': self._process_service_requests,
+            'system_health': self._process_system_health,
+            'custom_metrics': self._process_custom_metrics
         }
 
-        for incident in incidents:
-            # Count by priority
-            priority = incident.get('priority', '5')
-            if priority in metrics['by_priority']:
-                metrics['by_priority'][priority] += 1
+    def get_configured_tables(self) -> Dict[str, str]:
+        """Get all configured tables from config"""
+        return self.config.get('servicenow', {}).get('tables', {})
 
-            # Count by state
-            state_num = incident.get('state', '1')
-            state_name = state_mapping.get(state_num, 'new')
-            if state_name in metrics['by_state']:
-                metrics['by_state'][state_name] += 1
+    def get_configured_custom_metrics(self) -> Dict[str, Dict]:
+        """Get all configured custom metrics from config"""
+        return self.config.get('custom_metrics', {})
 
-            # Count open incidents (states 1, 2, 3)
-            if state_num in ['1', '2', '3']:
-                metrics['open_incidents'] += 1
+    def get_configured_screens(self) -> List[str]:
+        """Get all configured display screens from config"""
+        return self.config.get('display', {}).get('screens', [])
 
-            # Count resolved today
-            if state_num in ['6', '7'] and incident.get('resolved_at'):
-                resolved_date = incident.get('resolved_at', '')[:10]
-                if resolved_date == now.strftime('%Y-%m-%d'):
-                    metrics['resolved_today'] += 1
+    def get_dashboard_data(self) -> Dict[str, Any]:
+        """Dynamically fetch only configured data sources"""
+        dashboard_data = {}
+        tables = self.get_configured_tables()
+        custom_metrics = self.get_configured_custom_metrics()
 
-            # Count by assignment group
-            group = incident.get('assignment_group', {}).get('display_value', 'Unassigned')
-            metrics['assignment_groups'][group] = metrics['assignment_groups'].get(group, 0) + 1
-
-        return metrics
-
-    def get_service_request_metrics(self) -> Dict:
-        """Get service request metrics"""
-        now = datetime.now()
-        yesterday = now - timedelta(days=1)
-
-        params = {
-            'sysparm_query': f'opened_at>={yesterday.strftime("%Y-%m-%d %H:%M:%S")}',
-            'sysparm_fields': 'state,approval,opened_at,assignment_group',
-            'sysparm_limit': '1000'
-        }
-
-        data = self._make_request('table/sc_request', params)
-
-        if 'error' in data:
-            return {'total_requests': 0, 'by_state': {}, 'by_approval': {}}
-
-        requests_data = data.get('result', [])
-
-        metrics = {
-            'total_requests': len(requests_data),
-            'by_state': {},
-            'by_approval': {},
-            'pending_approval': 0,
-            'in_progress': 0,
-            'fulfilled': 0
-        }
-
-        for req in requests_data:
-            state = req.get('state', 'unknown')
-            approval = req.get('approval', 'not_requested')
-
-            metrics['by_state'][state] = metrics['by_state'].get(state, 0) + 1
-            metrics['by_approval'][approval] = metrics['by_approval'].get(approval, 0) + 1
-
-            if approval == 'requested':
-                metrics['pending_approval'] += 1
-            elif state in ['2', '3']:  # Work in Progress, Pending
-                metrics['in_progress'] += 1
-            elif state == '3':  # Fulfilled
-                metrics['fulfilled'] += 1
-
-        return metrics
-
-    def get_system_health_metrics(self) -> Dict:
-        """
-        Get system health metrics - customize based on your monitoring setup
-        This is a template - you'll need to adapt to your specific health checks
-        """
-        # Example: Query custom health check table or use Performance Analytics
-        params = {
-            'sysparm_fields': 'name,status,last_check,response_time',
-            'sysparm_limit': '50'
-        }
-
-        # Replace 'u_system_health' with your actual health monitoring table
-        data = self._make_request('table/u_system_health', params)
-
-        if 'error' in data:
-            return {'systems_up': 0, 'systems_down': 0, 'avg_response_time': 0}
-
-        systems = data.get('result', [])
-
-        metrics = {
-            'systems_up': 0,
-            'systems_down': 0,
-            'total_systems': len(systems),
-            'avg_response_time': 0,
-            'systems_status': {}
-        }
-
-        total_response_time = 0
-
-        for system in systems:
-            status = system.get('status', 'unknown')
-            name = system.get('name', 'unknown')
-            response_time = float(system.get('response_time', 0))
-
-            metrics['systems_status'][name] = status
-
-            if status.lower() in ['up', 'online', 'active']:
-                metrics['systems_up'] += 1
-            else:
-                metrics['systems_down'] += 1
-
-            total_response_time += response_time
-
-        if len(systems) > 0:
-            metrics['avg_response_time'] = round(total_response_time / len(systems), 2)
-
-        return metrics
-
-    def get_dashboard_data(self) -> Dict:
-        """
-        Get all dashboard data in one call - similar to NHL API returning all games
-        This is the main method that will be called by the display logic
-        """
         self.logger.info("Fetching ServiceNow dashboard data...")
 
-        dashboard_data = {
-            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'incidents': self.get_incident_metrics(),
-            'service_requests': self.get_service_request_metrics(),
-            'system_health': self.get_system_health_metrics(),
-            'status': 'success'
+        # Process standard tables
+        for data_type, table_name in tables.items():
+            if data_type in self.data_handlers:
+                try:
+                    self.logger.debug(f"Fetching {data_type} from table {table_name}")
+                    raw_data = self.data_handlers[data_type](table_name)
+                    dashboard_data[data_type] = raw_data
+                except Exception as e:
+                    self.logger.error(f"Failed to fetch {data_type}: {e}")
+                    dashboard_data[data_type] = []
+
+        # Process custom metrics
+        if custom_metrics:
+            dashboard_data['custom_metrics'] = {}
+            for metric_name, metric_config in custom_metrics.items():
+                try:
+                    self.logger.debug(f"Fetching custom metric: {metric_name}")
+                    raw_data = self._get_custom_metric(metric_name, metric_config)
+                    dashboard_data['custom_metrics'][metric_name] = raw_data
+                except Exception as e:
+                    self.logger.error(f"Failed to fetch custom metric {metric_name}: {e}")
+                    dashboard_data['custom_metrics'][metric_name] = []
+
+        # Process the raw data into display-ready format
+        processed_data = self._process_dashboard_data(dashboard_data)
+
+        return processed_data
+
+    def _process_dashboard_data(self, raw_data: Dict) -> Dict[str, Any]:
+        """Process raw data into display-ready format"""
+        processed = {}
+
+        for data_type, data in raw_data.items():
+            if data_type in self.data_processors:
+                try:
+                    processed[data_type] = self.data_processors[data_type](data)
+                except Exception as e:
+                    self.logger.error(f"Failed to process {data_type}: {e}")
+                    processed[data_type] = self._get_default_processed_data(data_type)
+            else:
+                # Pass through unprocessed data
+                processed[data_type] = data
+
+        return processed
+
+    def _get_default_processed_data(self, data_type: str) -> Dict:
+        """Return safe default data structure for failed processing"""
+        defaults = {
+            'incidents': {'total': 0, 'by_priority': {}, 'by_state': {}},
+            'service_requests': {'total': 0, 'by_state': {}},
+            'system_health': {'total_systems': 0, 'healthy_systems': 0, 'health_percentage': 100}
         }
+        return defaults.get(data_type, {})
 
-        # Add some calculated KPIs
-        incidents = dashboard_data['incidents']
-        dashboard_data['kpis'] = {
-            'critical_open': incidents['by_priority']['1'] + incidents['by_priority']['2'],
-            'resolution_rate': self._calculate_resolution_rate(incidents),
-            'total_open': incidents['open_incidents'],
-            'health_percentage': self._calculate_health_percentage(dashboard_data['system_health'])
-        }
+    # Data fetching handlers
+    def _get_incidents(self, table_name: str) -> List[Dict]:
+        """Fetch incident data"""
+        fields = ['number', 'priority', 'state', 'short_description', 'assignment_group', 'opened_at']
+        query = 'state!=6^state!=7'  # Exclude resolved/closed
+        return self.api.get_data_from_table(table_name, fields, query, limit=100)
 
-        self.logger.info(f"Dashboard data updated: {incidents['total_incidents']} incidents, "
-                         f"{dashboard_data['service_requests']['total_requests']} requests")
+    def _get_service_requests(self, table_name: str) -> List[Dict]:
+        """Fetch service request data"""
+        fields = ['number', 'state', 'short_description', 'assignment_group', 'opened_at']
+        query = 'state!=3^state!=4'  # Exclude closed/cancelled
+        return self.api.get_data_from_table(table_name, fields, query, limit=100)
 
-        return dashboard_data
+    def _get_system_health(self, table_name: str) -> List[Dict]:
+        """Fetch system health data"""
+        fields = ['name', 'status', 'last_check', 'response_time']
+        return self.api.get_data_from_table(table_name, fields, limit=50)
 
-    def _calculate_resolution_rate(self, incidents: Dict) -> float:
-        """Calculate resolution rate percentage"""
-        total = incidents['total_incidents']
-        if total == 0:
-            return 0.0
-        resolved = incidents['resolved_today']
-        return round((resolved / total) * 100, 1)
+    def _get_custom_metrics(self, data: Dict) -> Dict:
+        """Process all custom metrics"""
+        return data
 
-    def _calculate_health_percentage(self, health: Dict) -> float:
-        """Calculate overall system health percentage"""
-        total = health['total_systems']
-        if total == 0:
-            return 100.0
-        up = health['systems_up']
-        return round((up / total) * 100, 1)
+    def _get_custom_metric(self, metric_name: str, metric_config: Dict) -> List[Dict]:
+        """Fetch a single custom metric"""
+        table = metric_config.get('table')
+        query = metric_config.get('query', '')
+        fields = metric_config.get('fields', ['number', 'state', 'short_description'])
 
-    def _get_empty_metrics(self) -> Dict:
-        """Return empty metrics structure when API fails"""
+        if not table:
+            self.logger.warning(f"No table specified for custom metric: {metric_name}")
+            return []
+
+        return self.api.get_data_from_table(table, fields, query, limit=50)
+
+    # Data processing handlers
+    def _process_incidents(self, incidents: List[Dict]) -> Dict:
+        """Process incident data for display"""
+        if not incidents:
+            return {'total': 0, 'by_priority': {}, 'by_state': {}}
+
+        by_priority = {}
+        by_state = {}
+        by_group = {}
+
+        for incident in incidents:
+            # Priority breakdown
+            priority = incident.get('priority', 'Unknown')
+            by_priority[priority] = by_priority.get(priority, 0) + 1
+
+            # State breakdown  
+            state = incident.get('state', 'Unknown')
+            by_state[state] = by_state.get(state, 0) + 1
+
+            # Assignment group breakdown
+            group = incident.get('assignment_group', {}).get('display_value', 'Unassigned')
+            by_group[group] = by_group.get(group, 0) + 1
+
         return {
-            'total_incidents': 0,
-            'by_priority': {'1': 0, '2': 0, '3': 0, '4': 0, '5': 0},
-            'by_state': {
-                'new': 0, 'in_progress': 0, 'on_hold': 0,
-                'resolved': 0, 'closed': 0, 'canceled': 0
-            },
-            'open_incidents': 0,
-            'resolved_today': 0,
-            'assignment_groups': {},
-            'last_updated': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'error': True
+            'total': len(incidents),
+            'by_priority': by_priority,
+            'by_state': by_state,
+            'by_assignment_group': by_group,
+            'raw_data': incidents
         }
 
-    def test_connection(self) -> bool:
-        """Test API connection"""
-        try:
-            # Simple test query
-            params = {'sysparm_limit': '1'}
-            result = self._make_request('table/incident', params)
-            return 'error' not in result
-        except Exception as e:
-            self.logger.error(f"Connection test failed: {e}")
-            return False
+    def _process_service_requests(self, requests: List[Dict]) -> Dict:
+        """Process service request data for display"""
+        if not requests:
+            return {'total': 0, 'by_state': {}}
 
+        by_state = {}
+        by_group = {}
 
-# Example usage and configuration
-if __name__ == "__main__":
-    # Configuration - in real use, load from config file
-    config = {
-        'instance_url': 'https://yourinstance.service-now.com',
-        'username': 'your_username',
-        'password': 'your_password',
-        'verify_ssl': True
-    }
+        for request in requests:
+            # State breakdown
+            state = request.get('state', 'Unknown')
+            by_state[state] = by_state.get(state, 0) + 1
 
-    # Initialize API client
-    sn_api = ServiceNowAPI(**config)
+            # Assignment group breakdown
+            group = request.get('assignment_group', {}).get('display_value', 'Unassigned')
+            by_group[group] = by_group.get(group, 0) + 1
 
-    # Test connection
-    if sn_api.test_connection():
-        print("✅ ServiceNow connection successful")
+        return {
+            'total': len(requests),
+            'by_state': by_state,
+            'by_assignment_group': by_group,
+            'raw_data': requests
+        }
 
-        # Get dashboard data
-        data = sn_api.get_dashboard_data()
+    def _process_system_health(self, health_data: List[Dict]) -> Dict:
+        """Process system health data for display"""
+        if not health_data:
+            return {
+                'total_systems': 0,
+                'healthy_systems': 0,
+                'health_percentage': 100,
+                'by_status': {}
+            }
 
-        # Print summary
-        print(f"\n📊 Dashboard Summary:")
-        print(f"   Total Incidents: {data['incidents']['total_incidents']}")
-        print(f"   Critical/High Priority: {data['kpis']['critical_open']}")
-        print(f"   Open Incidents: {data['kpis']['total_open']}")
-        print(f"   Resolution Rate: {data['kpis']['resolution_rate']}%")
-        print(f"   System Health: {data['kpis']['health_percentage']}%")
+        total_systems = len(health_data)
+        by_status = {}
+        healthy_statuses = ['active', 'healthy', 'up', 'online', 'ok']
+        healthy_systems = 0
 
-        # Print detailed breakdown
-        print(f"\n🚨 Incidents by Priority:")
-        for priority, count in data['incidents']['by_priority'].items():
-            print(f"   P{priority}: {count}")
+        for system in health_data:
+            status = system.get('status', 'unknown').lower()
+            by_status[status] = by_status.get(status, 0) + 1
 
-        print(f"\n📋 Service Requests: {data['service_requests']['total_requests']}")
+            if status in healthy_statuses:
+                healthy_systems += 1
 
-    else:
-        print("❌ ServiceNow connection failed - check credentials and URL")
+        health_percentage = int((healthy_systems / total_systems) * 100) if total_systems > 0 else 100
+
+        return {
+            'total_systems': total_systems,
+            'healthy_systems': healthy_systems,
+            'health_percentage': health_percentage,
+            'by_status': by_status,
+            'raw_data': health_data
+        }
+
+    def _process_custom_metrics(self, custom_data: Dict) -> Dict:
+        """Process custom metrics data"""
+        processed = {}
+
+        for metric_name, data in custom_data.items():
+            processed[metric_name] = {
+                'count': len(data) if isinstance(data, list) else 0,
+                'raw_data': data
+            }
+
+        return processed
+
+    def get_available_screens(self) -> List[str]:
+        """Get list of screens that can be displayed based on available data"""
+        available_screens = []
+        configured_screens = self.get_configured_screens()
+        tables = self.get_configured_tables()
+        custom_metrics = self.get_configured_custom_metrics()
+
+        # Map screen names to required data
+        screen_requirements = {
+            'incident_summary': 'incidents',
+            'priority_breakdown': 'incidents',
+            'assignment_groups': ['incidents', 'service_requests'],
+            'service_requests': 'service_requests',
+            'system_health': 'system_health'
+        }
+
+        for screen in configured_screens:
+            if screen in screen_requirements:
+                required = screen_requirements[screen]
+                if isinstance(required, list):
+                    # Screen needs any of the required data types
+                    if any(req in tables for req in required):
+                        available_screens.append(screen)
+                else:
+                    # Screen needs specific data type
+                    if required in tables:
+                        available_screens.append(screen)
+            elif screen.startswith('custom_'):
+                # Custom metric screen
+                metric_name = screen.replace('custom_', '')
+                if metric_name in custom_metrics:
+                    available_screens.append(screen)
+            else:
+                # Unknown screen, include it anyway (might be handled elsewhere)
+                available_screens.append(screen)
+
+        return available_screens
+
+    def validate_configuration(self) -> Dict[str, List[str]]:
+        """Validate configuration and return any issues"""
+        issues = {
+            'warnings': [],
+            'errors': []
+        }
+
+        tables = self.get_configured_tables()
+        screens = self.get_configured_screens()
+        custom_metrics = self.get_configured_custom_metrics()
+
+        # Check if any screens won't work
+        screen_requirements = {
+            'incident_summary': 'incidents',
+            'priority_breakdown': 'incidents',
+            'assignment_groups': ['incidents', 'service_requests'],
+            'service_requests': 'service_requests',
+            'system_health': 'system_health'
+        }
+
+        for screen in screens:
+            if screen in screen_requirements:
+                required = screen_requirements[screen]
+                if isinstance(required, list):
+                    if not any(req in tables for req in required):
+                        issues['warnings'].append(
+                            f"Screen '{screen}' requires one of {required} but none are configured"
+                        )
+                else:
+                    if required not in tables:
+                        issues['warnings'].append(
+                            f"Screen '{screen}' requires '{required}' table but it's not configured"
+                        )
+
+        # Check custom metrics
+        for metric_name, config in custom_metrics.items():
+            if 'table' not in config:
+                issues['errors'].append(f"Custom metric '{metric_name}' missing required 'table' field")
+
+        return issues
