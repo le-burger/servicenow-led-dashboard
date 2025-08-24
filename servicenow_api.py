@@ -134,9 +134,17 @@ class ConfigDrivenDashboard:
         for data_type, data in raw_data.items():
             if data_type in self.data_processors:
                 try:
+                    # Add debug logging
+                    self.logger.debug(
+                        f"Processing {data_type}: {type(data)} with {len(data) if hasattr(data, '__len__') else 'unknown'} items")
+                    if data and hasattr(data, '__iter__') and len(data) > 0:
+                        self.logger.debug(
+                            f"First item type for {data_type}: {type(data[0]) if isinstance(data, list) else 'not a list'}")
+
                     processed[data_type] = self.data_processors[data_type](data)
                 except Exception as e:
                     self.logger.error(f"Failed to process {data_type}: {e}")
+                    self.logger.debug(f"Data that failed processing: {data}")
                     processed[data_type] = self._get_default_processed_data(data_type)
             else:
                 # Pass through unprocessed data
@@ -190,7 +198,7 @@ class ConfigDrivenDashboard:
     # Data processing handlers
     def _process_incidents(self, incidents: List[Dict]) -> Dict:
         """Process incident data for display"""
-        if not incidents:
+        if not incidents or not isinstance(incidents, list):
             return {'total': 0, 'by_priority': {}, 'by_state': {}}
 
         by_priority = {}
@@ -198,16 +206,27 @@ class ConfigDrivenDashboard:
         by_group = {}
 
         for incident in incidents:
+            # Handle case where incident might not be a dict
+            if not isinstance(incident, dict):
+                self.logger.warning(f"Unexpected incident data type: {type(incident)}")
+                continue
+
             # Priority breakdown
             priority = incident.get('priority', 'Unknown')
             by_priority[priority] = by_priority.get(priority, 0) + 1
 
-            # State breakdown  
+            # State breakdown
             state = incident.get('state', 'Unknown')
             by_state[state] = by_state.get(state, 0) + 1
 
-            # Assignment group breakdown
-            group = incident.get('assignment_group', {}).get('display_value', 'Unassigned')
+            # Assignment group breakdown - handle both string and dict formats
+            assignment_group = incident.get('assignment_group', 'Unassigned')
+            if isinstance(assignment_group, dict):
+                group = assignment_group.get('display_value', 'Unassigned')
+            elif isinstance(assignment_group, str):
+                group = assignment_group
+            else:
+                group = 'Unassigned'
             by_group[group] = by_group.get(group, 0) + 1
 
         return {
@@ -220,19 +239,30 @@ class ConfigDrivenDashboard:
 
     def _process_service_requests(self, requests: List[Dict]) -> Dict:
         """Process service request data for display"""
-        if not requests:
+        if not requests or not isinstance(requests, list):
             return {'total': 0, 'by_state': {}}
 
         by_state = {}
         by_group = {}
 
         for request in requests:
+            # Handle case where request might not be a dict
+            if not isinstance(request, dict):
+                self.logger.warning(f"Unexpected service request data type: {type(request)}")
+                continue
+
             # State breakdown
             state = request.get('state', 'Unknown')
             by_state[state] = by_state.get(state, 0) + 1
 
-            # Assignment group breakdown
-            group = request.get('assignment_group', {}).get('display_value', 'Unassigned')
+            # Assignment group breakdown - handle both string and dict formats
+            assignment_group = request.get('assignment_group', 'Unassigned')
+            if isinstance(assignment_group, dict):
+                group = assignment_group.get('display_value', 'Unassigned')
+            elif isinstance(assignment_group, str):
+                group = assignment_group
+            else:
+                group = 'Unassigned'
             by_group[group] = by_group.get(group, 0) + 1
 
         return {
