@@ -118,7 +118,7 @@ def test_modular_api_connection(config: Dict[str, Any]):
 
     try:
         # Import the new modular classes
-        from servicenow_api_refactor import ServiceNowAPI, ConfigDrivenDashboard
+        from servicenow_api import ServiceNowAPI, ConfigDrivenDashboard
 
         sn_config = config['servicenow']
 
