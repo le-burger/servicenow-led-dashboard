@@ -20,6 +20,16 @@ try:
 except ImportError:
     LED_MATRIX_AVAILABLE = False
     print("⚠️  RGB Matrix library not available - running in simulation mode")
+    # --- Shim: provide minimal graphics API so code can run without rgbmatrix ---
+    class graphics:  # type: ignore
+        class Color:
+            def __init__(self, red: int, green: int, blue: int):
+                self.red = red
+                self.green = green
+                self.blue = blue
+        class Font:
+            def LoadFont(self, *_, **__):
+                pass
 
 
 class DisplayRenderer:
@@ -365,6 +375,146 @@ class DisplayRenderer:
             self.logger.info("Display cleared")
 
 
+# --- New: PIL-based frame renderer for local development (no hardware) ---
+
+def render_dashboard_frame(screen_name: str, data: Dict[str, Any], width: int = 64, height: int = 32) -> Image.Image:
+    # Compose a single RGB frame as a Pillow Image for the requested screen.
+    # Improved layout: higher contrast, consistent spacing, LED-like bitmap fonts, and subtle bars.
+    img = Image.new("RGB", (width, height), (0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    # Try to reuse the same BDF fonts as the hardware path (crisp on low-res displays)
+    def try_load_bdf(name: str):
+        # Typical path when you have the rpi-rgb-led-matrix submodule checked out
+        candidates = [
+            "/home/pi/servicenow-led-dashboard/submodules/rpi-rgb-led-matrix/fonts/" + name,
+            "./submodules/rpi-rgb-led-matrix/fonts/" + name,
+            "./fonts/" + name,
+        ]
+        for p in candidates:
+            try:
+                return ImageFont.load_path(p)
+            except Exception:
+                pass
+        return None
+
+    font_small = try_load_bdf("4x6.bdf") or ImageFont.load_default()
+    font_medium = try_load_bdf("5x8.bdf") or font_small
+    font_large = try_load_bdf("6x10.bdf") or font_medium
+
+    # Palette
+    WHITE = (255, 255, 255)
+    GREY = (140, 140, 140)
+    GREEN = (0, 255, 0)
+    YELLOW = (255, 255, 0)
+    ORANGE = (255, 165, 0)
+    RED = (255, 0, 0)
+    CYAN = (0, 200, 255)
+
+    def text(x, y, s, color=WHITE, font=font_small):
+        draw.text((x, y), str(s), fill=color, font=font)
+
+    def rect(x, y, w, h, color):
+        draw.rectangle([x, y, x + w - 1, y + h - 1], fill=color)
+
+    def bar(x, y, w, h, value, max_value, color_on, color_bg=(10, 10, 10)):
+        # horizontal bar with background
+        rect(x, y, w, h, color_bg)
+        if max_value <= 0:
+            return
+        fill_w = int(max(0, min(w, round((value / max_value) * w))))
+        if fill_w:
+            rect(x, y, fill_w, h, color_on)
+
+    # Optional alert flash background
+    alerts = data.get('alerts', [])
+    if any(a.get('level') == 'critical' for a in alerts):
+        rect(0, 0, width, height, (30, 0, 0))
+
+    # Common title line with small divider
+    def header(title: str, color=WHITE):
+        text(1, 0, title.upper(), color, font_small)
+        rect(0, 7, width, 1, (20, 20, 20))
+
+    if screen_name == 'incident_summary':
+        header('Incidents', GREEN)
+        incidents = data.get('incidents', {})
+        kpis = data.get('kpis', {})
+        total = int(incidents.get('total_incidents', 0))
+        crit = int(kpis.get('critical_open', 0))
+        open_cnt = int(kpis.get('total_open', 0))
+        res = kpis.get('resolution_rate', 0)
+        try:
+            res = round(float(res))
+        except Exception:
+            res = 0
+
+        # Big total number
+        text(2, 10, total, CYAN if total else GREY, font_large)
+        text(28, 10, 'open', GREY, font_small)
+        text(28, 16, open_cnt, WHITE if open_cnt else GREY, font_medium)
+
+        # Critical badge
+        crit_color = RED if crit > 0 else GREY
+        rect(2, 21, 12, 9, (20, 0, 0) if crit > 0 else (8, 8, 8))
+        text(4, 22, 'P1/2', crit_color, font_small)
+        text(4, 27, crit, crit_color, font_small)
+
+        # Resolution bar 0–100
+        text(28, 22, 'Res', GREY, font_small)
+        bar(28, 27, 34, 3, res, 100, GREEN if res >= 85 else (YELLOW if res >= 60 else ORANGE))
+
+        # Timestamp (right aligned-ish)
+        ts = data.get('timestamp', '')
+        if ts:
+            text(width - 20, 0, ts.split(' ')[1][:5], GREY, font_small)
+
+    elif screen_name == 'priority_breakdown':
+        header('Priority')
+        byp = data.get('incidents', {}).get('by_priority', {})
+        rows = [
+            ('P1', '1', RED),
+            ('P2', '2', ORANGE),
+            ('P3', '3', YELLOW),
+            ('P4', '4', GREEN),
+        ]
+        y = 9
+        max_val = max([int(byp.get(k, 0)) for _, k, _ in rows] + [1])
+        for label, key, col in rows:
+            val = int(byp.get(key, 0))
+            text(2, y, label, col if val else GREY, font_small)
+            bar(12, y + 1, 48, 4, val, max_val, col)
+            text(12 + 48 + 2, y, val, WHITE if val else GREY, font_small)
+            y += 7
+
+    elif screen_name == 'system_health':
+        header('Health')
+        kpis = data.get('kpis', {})
+        health_pct = int(round(float(kpis.get('health_percentage', 0)))) if kpis.get('health_percentage') is not None else 0
+        color = GREEN if health_pct >= 95 else (YELLOW if health_pct >= 85 else RED)
+        text(2, 10, f"{health_pct}%", color, font_large)
+
+        health = data.get('system_health', {})
+        up = int(health.get('systems_up', 0))
+        down = int(health.get('systems_down', 0))
+        avg_ms = int(health.get('avg_response_time', 0))
+
+        text(2, 22, 'Up', GREEN, font_small);   text(12, 22, up, WHITE if up else GREY, font_small)
+        text(2, 27, 'Down', RED, font_small);  text(20, 27, down, WHITE if down else GREY, font_small)
+
+        # Response time bar, assume 0–1000ms typical
+        bar_x = 34
+        text(bar_x, 22, 'Resp', GREY, font_small)
+        bar(bar_x, 27, 28, 3, min(avg_ms, 1000), 1000, CYAN)
+
+    else:
+        header('Dashboard', GREEN)
+        text(2, 12, 'ServiceNow', GREEN, font_medium)
+        text(2, 20, 'LED Board', GREEN, font_medium)
+
+    return img
+
+
 # Simulation mode for testing without hardware
 class DisplaySimulator:
     """Simulate LED display for testing purposes"""
@@ -409,12 +559,76 @@ class DisplaySimulator:
         print(f"{'=' * 50}")
 
 
+#
+# --- Live simulator window using pygame (no hardware) ---
+def _run_live_simulator(screens, sample_data, width=64, height=32, scale=12, fps=30, dwell=2.0):
+    """Open a pixel window and render frames continuously.
+    - screens: list of screen names to rotate
+    - sample_data: dict with data to render
+    - width/height: logical LED matrix size
+    - scale: size of each LED on screen
+    - fps: redraw cap
+    - dwell: seconds to keep each screen before switching
+    """
+    try:
+        import pygame
+    except Exception:
+        print("pygame not installed. Install with: pip install pygame")
+        raise
+
+    pygame.init()
+    window = pygame.display.set_mode((width * scale, height * scale))
+    pygame.display.set_caption("LED Simulator")
+    clock = pygame.time.Clock()
+
+    current_idx = 0
+    elapsed = 0.0
+
+    running = True
+    while running:
+        # Events
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            elif event.type == pygame.KEYDOWN:
+                if event.key in (pygame.K_ESCAPE, pygame.K_q):
+                    running = False
+                elif event.key in (pygame.K_RIGHT, pygame.K_SPACE):
+                    current_idx = (current_idx + 1) % len(screens); elapsed = 0.0
+                elif event.key == pygame.K_LEFT:
+                    current_idx = (current_idx - 1) % len(screens); elapsed = 0.0
+
+        # Switch screen by dwell time
+        dt = clock.get_time() / 1000.0
+        elapsed += dt
+        if elapsed >= dwell:
+            current_idx = (current_idx + 1) % len(screens)
+            elapsed = 0.0
+
+        # Render current screen
+        screen = screens[current_idx]
+        img = render_dashboard_frame(screen, sample_data, width=width, height=height)
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+
+        # PIL -> pygame
+        raw = img.tobytes()
+        surf = pygame.image.fromstring(raw, img.size, "RGB")
+        surf = pygame.transform.scale(surf, (width * scale, height * scale))
+
+        window.blit(surf, (0, 0))
+        pygame.display.flip()
+        clock.tick(fps)
+
+    pygame.quit()
+
+
 def test_display():
     """Test the display renderer with sample data"""
     # Sample configuration
     config = {
         'matrix': {
-            'led_rows': 32,
+            'led_rows': 64,
             'led_cols': 64,
             'led_brightness': 60,
             'hardware_mapping': 'adafruit-hat',
@@ -487,13 +701,20 @@ def test_display():
 
         renderer.cleanup()
     else:
-        # Test with simulator
-        simulator = DisplaySimulator()
+        # Live simulator window (requires pygame). Press ESC or close window to exit.
         screens = ['incident_summary', 'priority_breakdown', 'system_health']
-
-        for screen in screens:
-            simulator.simulate_render(screen, sample_data)
-            time.sleep(2)
+        try:
+            _run_live_simulator(screens, sample_data, width=64, height=32, scale=12, fps=30, dwell=2.0)
+        except ModuleNotFoundError:
+            # Fallback: keep PNGs for visibility if pygame is missing
+            from pathlib import Path
+            frames_dir = Path("frames")
+            frames_dir.mkdir(exist_ok=True)
+            for idx, screen in enumerate(screens, start=1):
+                img = render_dashboard_frame(screen, sample_data, width=64, height=32)
+                out = frames_dir / f"frame_{idx:02d}_{screen}.png"
+                img.save(out)
+                print(f"💾 Wrote {out}. Install pygame for live window: pip install pygame")
 
 
 if __name__ == "__main__":
