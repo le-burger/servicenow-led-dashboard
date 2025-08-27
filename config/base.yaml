@@ -1,0 +1,33 @@
+# Base configuration - shared across all environments
+application:
+  name: "ServiceNow LED Dashboard"
+  version: "2.0.0"
+
+# Data sources configuration
+data_sources:
+  servicenow:
+    tables:
+      incidents: "incident"
+      service_requests: "sc_request"
+      changes: "change_request"
+    refresh_intervals:
+      incidents: 60
+      service_requests: 120
+      changes: 300
+
+# Display configuration
+display:
+  rotation_time: 10
+  screens:
+    - incident_summary
+    - priority_breakdown
+    - assignment_groups
+    - service_requests
+    - system_health
+
+# Alert configuration
+alerts:
+  thresholds:
+    critical_incidents: 5
+    system_health: 90
+    queue_depth: 20

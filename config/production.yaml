@@ -1,0 +1,36 @@
+# Production environment configuration
+environment: production
+
+# ServiceNow connection
+data_sources:
+  type: servicenow
+  servicenow:
+    instance_url: "${SERVICENOW_URL}"
+    username: "${SERVICENOW_USER}"
+    password: "${SERVICENOW_PASSWORD}"
+    verify_ssl: true
+
+# LED Matrix configuration
+display:
+  type: led_matrix
+  led_matrix:
+    rows: 32
+    cols: 64
+    chain: 1
+    parallel: 1
+    brightness: 60
+    hardware_mapping: "adafruit-hat-pwm"
+    gpio_slowdown: 1
+
+# Production logging
+logging:
+  level: INFO
+  file: "/var/log/servicenow-dashboard.log"
+  max_size_mb: 50
+  backup_count: 5
+
+# Performance
+performance:
+  cache_enabled: true
+  cache_ttl: 300
+  max_workers: 4

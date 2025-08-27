@@ -9,7 +9,7 @@ env/
 ENV/
 
 # Configuration files with sensitive data
-config.yaml
+config/config.yaml
 config_local.yaml
 
 # Logs

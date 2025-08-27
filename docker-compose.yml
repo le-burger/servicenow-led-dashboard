@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    environment:
+      - DASHBOARD_ENV=development
+      - DISPLAY=${DISPLAY}
+    volumes:
+      - .:/app
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    network_mode: host
+    stdin_open: true
+    tty: true
+    command: python main.py --env development
+
+  simulator:
+    image: node:16
+    working_dir: /app
+    volumes:
+      - ./web-simulator:/app
+    ports:
+      - "3000:3000"
+    command: npm start

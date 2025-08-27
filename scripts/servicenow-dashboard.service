@@ -1,0 +1,16 @@
+[Unit]
+Description=ServiceNow LED Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/servicenow-dashboard
+Environment="DASHBOARD_ENV=production"
+Environment="PATH=/home/pi/servicenow-dashboard/venv/bin"
+ExecStart=/home/pi/servicenow-dashboard/venv/bin/python /home/pi/servicenow-dashboard/main.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
